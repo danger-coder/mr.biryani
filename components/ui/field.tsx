@@ -27,8 +27,13 @@ export function Label({
   );
 }
 
+/* The default tone suits the light admin surface. The customer site overrides
+   bg/text via className for its dark brand surface — so nothing here may carry
+   a `dark:` variant: tailwind-merge cannot drop a variant class in favour of an
+   unvariated one, so `dark:bg-white` would survive the override and repaint the
+   field white under OS dark mode, hiding the light text on top of it. */
 const baseControl =
-  "w-full rounded-lg border bg-white/95 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 transition-colors disabled:cursor-not-allowed disabled:opacity-60 border-slate-300 focus:border-slate-400 dark:bg-white";
+  "w-full rounded-lg border bg-white/95 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 transition-colors disabled:cursor-not-allowed disabled:opacity-60 border-slate-300 focus:border-slate-400";
 
 export const Input = React.forwardRef<
   HTMLInputElement,
