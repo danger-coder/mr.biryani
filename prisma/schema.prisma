@@ -1,0 +1,374 @@
+// Mr. Biryani — relational schema
+// Design notes:
+//  - OrderItem stores a snapshot of name/price at purchase time so historical
+//    orders never change when the menu changes (see section 36 of the spec).
+//  - Money is stored in `Decimal(10, 2)` (rupees). Never floats.
+//  - Structured for future growth: orders/reservations already carry an optional
+//    locationId so a second restaurant, drivers, or a KDS can be layered on.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  // Pooled connection — what the app runs its queries through. On a serverless
+  // host every invocation is a fresh client, so it must go via a pooler.
+  url      = env("DATABASE_URL")
+  // Unpooled connection — migrations only. `migrate deploy` takes advisory
+  // locks and issues DDL, neither of which survives a transaction pooler.
+  // Locally both point at the same server.
+  directUrl = env("DIRECT_URL")
+}
+
+enum Role {
+  ADMIN
+  CUSTOMER
+}
+
+enum SpiceLevel {
+  MILD
+  MEDIUM
+  HOT
+  EXTRA_HOT
+}
+
+enum OrderType {
+  DELIVERY
+  PICKUP
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PREPARING
+  READY
+  OUT_FOR_DELIVERY
+  DELIVERED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  UNPAID
+  PAID
+  REFUNDED
+  FAILED
+}
+
+enum PaymentMethod {
+  CASH_ON_DELIVERY
+  ONLINE
+  CARD
+}
+
+enum ReservationStatus {
+  PENDING
+  CONFIRMED
+  COMPLETED
+  CANCELLED
+}
+
+enum CouponType {
+  PERCENTAGE
+  FIXED
+}
+
+enum NotificationType {
+  ORDER
+  RESERVATION
+  PROMOTION
+  SYSTEM
+  REVIEW
+}
+
+enum ReviewStatus {
+  PENDING
+  APPROVED
+  HIDDEN
+}
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  phone        String?
+  passwordHash String
+  role         Role     @default(CUSTOMER)
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  addresses     Address[]
+  orders        Order[]
+  reservations  Reservation[]
+  notifications Notification[]
+  favorites     Favorite[]
+  reviews       Review[]
+  resetTokens   PasswordResetToken[]
+
+  @@index([role])
+  @@index([createdAt])
+}
+
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Address {
+  id         String  @id @default(cuid())
+  userId     String
+  label      String  @default("Home")
+  address    String
+  city       String
+  postalCode String?
+  isDefault  Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Category {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  slug        String   @unique
+  description String?
+  image       String?
+  sortOrder   Int      @default(0)
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  menuItems MenuItem[]
+
+  @@index([active, sortOrder])
+}
+
+model MenuItem {
+  id          String     @id @default(cuid())
+  categoryId  String
+  name        String
+  slug        String     @unique
+  description String
+  ingredients String?
+  price       Decimal    @db.Decimal(10, 2)
+  image       String?
+  spiceLevel  SpiceLevel @default(MEDIUM)
+  vegetarian  Boolean    @default(false)
+  available   Boolean    @default(true)
+  featured    Boolean    @default(false)
+  sortOrder   Int        @default(0)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  // Restrict deletion: a menu item that has been ordered stays referenced so the
+  // admin can trace an order line back to the catalogue. Items are disabled, not
+  // deleted, once they have order history.
+  category   Category    @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  orderItems OrderItem[]
+  favorites  Favorite[]
+  reviews    Review[]
+
+  @@index([categoryId])
+  @@index([available, featured])
+}
+
+model Favorite {
+  id         String   @id @default(cuid())
+  userId     String
+  menuItemId String
+  createdAt  DateTime @default(now())
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  menuItem MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, menuItemId])
+  @@index([userId])
+}
+
+model Order {
+  id              String        @id @default(cuid())
+  orderNumber     String        @unique
+  userId          String?
+  locationId      String?
+  customerName    String
+  customerPhone   String
+  customerEmail   String?
+  deliveryAddress String?
+  city            String?
+  orderType       OrderType     @default(DELIVERY)
+  status          OrderStatus   @default(PENDING)
+  paymentStatus   PaymentStatus @default(UNPAID)
+  paymentMethod   PaymentMethod @default(CASH_ON_DELIVERY)
+  couponCode      String?
+  subtotal        Decimal       @db.Decimal(10, 2)
+  deliveryFee     Decimal       @default(0) @db.Decimal(10, 2)
+  discount        Decimal       @default(0) @db.Decimal(10, 2)
+  total           Decimal       @db.Decimal(10, 2)
+  notes           String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  user     User?               @relation(fields: [userId], references: [id], onDelete: SetNull)
+  location RestaurantLocation? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  items    OrderItem[]
+  reviews  Review[]
+  events   OrderEvent[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([paymentStatus])
+  @@index([createdAt])
+}
+
+model OrderItem {
+  id         String   @id @default(cuid())
+  orderId    String
+  menuItemId String?
+  // Snapshot fields — frozen at purchase time.
+  name       String
+  price      Decimal  @db.Decimal(10, 2)
+  quantity   Int
+  subtotal   Decimal  @db.Decimal(10, 2)
+  image      String?
+
+  order    Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  menuItem MenuItem? @relation(fields: [menuItemId], references: [id], onDelete: SetNull)
+
+  @@index([orderId])
+  @@index([menuItemId])
+}
+
+// Audit trail for the customer-facing order timeline.
+model OrderEvent {
+  id        String      @id @default(cuid())
+  orderId   String
+  status    OrderStatus
+  note      String?
+  createdAt DateTime    @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+}
+
+model Reservation {
+  id         String            @id @default(cuid())
+  userId     String?
+  locationId String?
+  name       String
+  phone      String
+  email      String?
+  date       DateTime          @db.Date
+  time       String
+  guests     Int
+  status     ReservationStatus @default(PENDING)
+  notes      String?
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+
+  user     User?               @relation(fields: [userId], references: [id], onDelete: SetNull)
+  location RestaurantLocation? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([date])
+  @@index([status])
+}
+
+model Coupon {
+  id           String     @id @default(cuid())
+  code         String     @unique
+  description  String?
+  type         CouponType @default(PERCENTAGE)
+  value        Decimal    @db.Decimal(10, 2)
+  minimumOrder Decimal    @default(0) @db.Decimal(10, 2)
+  maxDiscount  Decimal?   @db.Decimal(10, 2)
+  expiresAt    DateTime?
+  usageLimit   Int?
+  usedCount    Int        @default(0)
+  active       Boolean    @default(true)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@index([active])
+}
+
+model RestaurantLocation {
+  id           String   @id @default(cuid())
+  name         String
+  slug         String   @unique
+  address      String
+  city         String
+  phone        String
+  email        String?
+  openingHours String
+  latitude     Float?
+  longitude    Float?
+  image        String?
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  orders       Order[]
+  reservations Reservation[]
+}
+
+model Review {
+  id         String       @id @default(cuid())
+  userId     String
+  menuItemId String?
+  orderId    String?
+  rating     Int
+  title      String?
+  comment    String
+  status     ReviewStatus @default(PENDING)
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  menuItem MenuItem? @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  order    Order?    @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([menuItemId])
+  @@index([userId])
+}
+
+model Notification {
+  id      String           @id @default(cuid())
+  // null userId => broadcast to the admin inbox
+  userId  String?
+  type    NotificationType @default(SYSTEM)
+  title   String
+  message String
+  link    String?
+  forAdmin Boolean         @default(false)
+  read    Boolean          @default(false)
+  createdAt DateTime       @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, read])
+  @@index([forAdmin, read])
+  @@index([createdAt])
+}
+
+// Simple typed key/value store for site settings (section 20).
+model SiteSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
